@@ -1,7 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
 
-# ── User models ──
 class UserRegister(BaseModel):
     name:     str
     email:    str
@@ -14,15 +13,6 @@ class UserLogin(BaseModel):
     email:    str
     password: str
 
-class UserResponse(BaseModel):
-    id:     int
-    name:   str
-    email:  str
-    branch: str
-    year:   int
-    gender: str
-
-# ── Profile models ──
 class ProfileCreate(BaseModel):
     sleep_time:   str
     wake_time:    str
@@ -31,3 +21,11 @@ class ProfileCreate(BaseModel):
     noise:        str
     guests:       str
     about:        Optional[str] = ""
+
+class Token(BaseModel):
+    access_token: str
+    token_type:   str
+
+class TokenData(BaseModel):
+    user_id: Optional[int] = None
+    email:   Optional[str] = None
