@@ -366,3 +366,249 @@ def delete_user(user_id: int):
     finally:
         cur.close()
         conn.close()
+        # ════════════════════════════════
+# POST /requests — send request
+# ════════════════════════════════
+@router.post("/requests")
+def send_request(
+    payload: dict,
+    current_user = Depends(get_current_user)
+):
+    conn, cur = get_cursor()
+    try:
+        sender_id   = current_user["user_id"]
+        receiver_id = payload.get("receiver_id")
+
+        if not receiver_id:
+            raise HTTPException(status_code=400, detail="receiver_id required")
+
+        if sender_id == receiver_id:
+            raise HTTPException(status_code=400, detail="Cannot send request to yourself")
+
+        # Check if request already exists
+        cur.execute("""
+            SELECT id, status FROM requests
+            WHERE sender_id = %s AND receiver_id = %s
+        """, (sender_id, receiver_id))
+        existing = cur.fetchone()
+
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Request already sent — status: {existing[1]}"
+            )
+
+        cur.execute("""
+            INSERT INTO requests (sender_id, receiver_id, status)
+            VALUES (%s, %s, 'pending')
+            RETURNING id
+        """, (sender_id, receiver_id))
+        conn.commit()
+
+        return {"message": "Request sent successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+# ════════════════════════════════
+# GET /requests — get my requests
+# ════════════════════════════════
+@router.get("/requests")
+def get_requests(current_user = Depends(get_current_user)):
+    conn, cur = get_cursor()
+    try:
+        user_id = current_user["user_id"]
+
+        # Requests I sent
+        cur.execute("""
+            SELECT r.id, u.name, u.branch, u.year, u.gender, r.status, r.created_at
+            FROM requests r
+            JOIN users u ON r.receiver_id = u.id
+            WHERE r.sender_id = %s
+            ORDER BY r.created_at DESC
+        """, (user_id,))
+        sent = [
+            {
+                "id": row[0], "name": row[1], "branch": row[2],
+                "year": row[3], "gender": row[4],
+                "status": row[5], "created_at": str(row[6]),
+                "type": "sent"
+            }
+            for row in cur.fetchall()
+        ]
+
+        # Requests I received
+        cur.execute("""
+            SELECT r.id, u.name, u.branch, u.year, u.gender, r.status, r.created_at
+            FROM requests r
+            JOIN users u ON r.sender_id = u.id
+            WHERE r.receiver_id = %s
+            ORDER BY r.created_at DESC
+        """, (user_id,))
+        received = [
+            {
+                "id": row[0], "name": row[1], "branch": row[2],
+                "year": row[3], "gender": row[4],
+                "status": row[5], "created_at": str(row[6]),
+                "type": "received"
+            }
+            for row in cur.fetchall()
+        ]
+
+        return {"sent": sent, "received": received}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+# ════════════════════════════════
+# PATCH /requests/{id} — update status
+# ════════════════════════════════
+@router.patch("/requests/{request_id}")
+def update_request(
+    request_id: int,
+    payload: dict,
+    current_user = Depends(get_current_user)
+):
+    conn, cur = get_cursor()
+    try:
+        status = payload.get("status")
+        if status not in ["accepted", "declined"]:
+            raise HTTPException(status_code=400, detail="Status must be accepted or declined")
+
+        cur.execute("""
+            UPDATE requests SET status = %s
+            WHERE id = %s AND receiver_id = %s
+            RETURNING id
+        """, (status, request_id, current_user["user_id"]))
+
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        conn.commit()
+        return {"message": f"Request {status}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+# ════════════════════════════════
+# GET /recommendations
+# Top 10 recommended roommates
+# ════════════════════════════════
+@router.get("/recommendations")
+def get_recommendations(current_user = Depends(get_current_user)):
+    conn, cur = get_cursor()
+    try:
+        user_id = current_user["user_id"]
+
+        # Get current user profile
+        cur.execute("""
+            SELECT u.branch, u.year, u.gender,
+                   p.sleep_time, p.wake_time, p.study_hours,
+                   p.cleanliness, p.noise, p.guests
+            FROM users u
+            JOIN profiles p ON u.id = p.user_id
+            WHERE u.id = %s
+        """, (user_id,))
+        me = cur.fetchone()
+
+        if not me:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        my_branch      = me[0]
+        my_sleep       = me[3]
+        my_study       = me[5]
+        my_cleanliness = me[6]
+        my_noise       = me[7]
+
+        # Get all other students with profiles
+        cur.execute("""
+            SELECT u.id, u.name, u.branch, u.year, u.gender,
+                   p.sleep_time, p.wake_time, p.study_hours,
+                   p.cleanliness, p.noise, p.guests, p.about
+            FROM users u
+            JOIN profiles p ON u.id = p.user_id
+            WHERE u.id != %s
+        """, (user_id,))
+        students = cur.fetchall()
+
+        # Calculate compatibility score for each student
+        results = []
+        for s in students:
+            score = 0
+            reasons = []
+
+            if s[2] == my_branch:
+                score += 20
+                reasons.append(f"Same branch ({s[2]})")
+
+            if s[5] == my_sleep:
+                score += 30
+                reasons.append(f"Same sleep schedule ({s[5]})")
+
+            if s[7] == my_study:
+                score += 15
+                reasons.append(f"Same study hours ({s[7]})")
+
+            if s[8] == my_cleanliness:
+                score += 20
+                reasons.append(f"Same cleanliness ({s[8]})")
+
+            if s[9] == my_noise:
+                score += 15
+                reasons.append(f"Same noise preference ({s[9]})")
+
+            results.append({
+                "id":          s[0],
+                "name":        s[1],
+                "branch":      s[2],
+                "year":        s[3],
+                "gender":      s[4],
+                "sleep_time":  s[5],
+                "wake_time":   s[6],
+                "study_hours": s[7],
+                "cleanliness": s[8],
+                "noise":       s[9],
+                "guests":      s[10],
+                "about":       s[11],
+                "compatibility": score,
+                "match_reasons": reasons
+            })
+
+        # Sort by score and return top 10
+        results.sort(key=lambda x: x["compatibility"], reverse=True)
+        top10 = results[:10]
+
+        return {
+            "recommendations": top10,
+            "total": len(top10),
+            "algorithm": {
+                "sleep_time":  30,
+                "branch":      20,
+                "cleanliness": 20,
+                "study_hours": 15,
+                "noise":       15
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()        
